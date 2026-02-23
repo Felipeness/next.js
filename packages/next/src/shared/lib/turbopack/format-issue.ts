@@ -41,32 +41,8 @@ export function formatIssue(issue: Issue) {
   }
   message += '\n'
 
-  if (
-    source?.range &&
-    source.source.content &&
-    // ignore Next.js/React internals, as these can often be huge bundled files.
-    !isInternal(filePath)
-  ) {
-    const { start, end } = source.range
-
-    // TODO(lukesandberg): move codeFrame formatting into turbopack, it would be more efficient than passing the source back and forth
-    const frame = codeFrameColumns(
-      source.source.content,
-      {
-        start: {
-          line: start.line + 1,
-          column: start.column + 1,
-        },
-        end: {
-          line: end.line + 1,
-          column: end.column + 1,
-        },
-      },
-      { color: true }
-    )
-    if (frame) {
-      message += frame.trimEnd() + '\n\n'
-    }
+  if (issue.codeFrame) {
+    message += issue.codeFrame.trimEnd() + '\n\n'
   }
 
   if (description) {
