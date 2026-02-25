@@ -76,8 +76,19 @@ export interface RequestStore extends CommonWorkUnitStore {
   prerenderResumeDataCache?: PrerenderResumeDataCache | null
   fallbackParams?: OpaqueFallbackRouteParams | null
 
+  // TODO: this is duplicated with prerender stores, should probably refactor
+  // to make it make more sense
+  controller?: AbortController
+  renderSignal?: AbortSignal
+  validationSamples?: InstantValidationSamples
+
   // DEV-only
   usedDynamic?: boolean
+}
+
+export type InstantValidationSamples = {
+  params: Params | undefined
+  searchParams: Record<string, string | string[] | null> | undefined
 }
 
 export type AsyncApiPromises = {
@@ -149,8 +160,8 @@ export interface PrerenderStoreModernClient
 export interface ValidationStoreClient extends PrerenderStoreModernCommon {
   readonly type: 'validation-client'
   readonly boundaryState: ValidationBoundaryTracking | null
-  // When we implement build validation, the store will contain e.g. cookies
-  // and other values derived from samples.
+  validationSamples: InstantValidationSamples | null
+  fallbackRouteParams: OpaqueFallbackRouteParams | null
 }
 
 export interface PrerenderStoreModernServer
