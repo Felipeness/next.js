@@ -289,7 +289,10 @@ impl MetaFile {
         options.offset(offset);
         let mmap = unsafe { options.map(&file)? };
         #[cfg(unix)]
-        mmap.advise(memmap2::Advice::Random)?;
+        {
+            mmap.advise(memmap2::Advice::Random)?;
+            mmap.advise(memmap2::Advice::WillNeed)?;
+        }
 
         // Second pass: build MetaEntry structs, eagerly deserializing each AMQF filter
         // zero-copy from the mmap.
