@@ -2366,8 +2366,8 @@ impl FileContent {
     }
 
     #[turbo_tasks::function]
-    pub async fn hash(&self) -> Result<Vc<u64>> {
-        Ok(Vc::cell(hash_xxh3_hash64(self)))
+    pub fn hash(&self, algorithm: HashAlgorithm) -> Vc<RcStr> {
+        Vc::cell(RcStr::from(deterministic_hash(self, algorithm)))
     }
 
     /// Compared to [FileContent::hash], this hashes only the bytes of the file content and nothing
