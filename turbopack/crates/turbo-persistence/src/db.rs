@@ -942,7 +942,7 @@ impl<S: ParallelScheduler, const FAMILIES: usize> TurboPersistence<S, FAMILIES> 
                     // during the merge loop. Empty filters (from commits with no
                     // reads) are discarded.
                     let used_key_hashes: Option<qfilter::Filter> = {
-                        let filters: Vec<qfilter::Filter> = meta_files
+                        let filter_refs: Vec<qfilter::FilterRef<'_>> = meta_files
                             .iter()
                             .filter(|m| m.family() == family)
                             .filter_map(|meta_file| {
@@ -952,19 +952,18 @@ impl<S: ParallelScheduler, const FAMILIES: usize> TurboPersistence<S, FAMILIES> 
                             .into_iter()
                             .filter(|amqf| !amqf.is_empty())
                             .collect();
-                        if filters.is_empty() {
+                        if filter_refs.is_empty() {
                             None
-                        } else if filters.len() == 1 {
-                            // Just directly use the single item
-                            filters.into_iter().next()
+                        } else if filter_refs.len() == 1 {
+                            Some(filter_refs[0].to_owned())
                         } else {
-                            let total_len: u64 = filters.iter().map(|f| f.len()).sum();
+                            let total_len: u64 = filter_refs.iter().map(|f| f.len()).sum();
                             let mut merged =
                                 qfilter::Filter::with_fingerprint_size(total_len, u64::BITS as u8)
                                     .expect("Failed to create merged AMQF filter");
-                            for filter in &filters {
+                            for filter_ref in &filter_refs {
                                 merged
-                                    .merge(false, filter)
+                                    .merge(false, &filter_ref.to_owned())
                                     .expect("Failed to merge AMQF filters");
                             }
                             merged.shrink_to_fit();

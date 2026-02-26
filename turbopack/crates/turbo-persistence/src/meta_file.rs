@@ -3,17 +3,14 @@ use std::{
     fmt::Display,
     fs::File,
     io::{BufReader, Seek},
-    ops::Deref,
     path::{Path, PathBuf},
     sync::OnceLock,
 };
 
 use anyhow::{Context, Result, bail};
-use bincode::{Decode, Encode};
 use bitfield::bitfield;
 use byteorder::{BE, ReadBytesExt};
 use memmap2::{Mmap, MmapOptions};
-use turbo_bincode::turbo_bincode_decode;
 
 use crate::{
     QueryKey,
@@ -50,14 +47,6 @@ impl Display for MetaEntryFlags {
     }
 }
 
-/// A wrapper around [`qfilter::Filter`] that implements [`Encode`] and [`Decode`].
-#[derive(Encode, Decode)]
-pub struct AmqfBincodeWrapper(
-    // this annotation can be replaced with `#[bincode(serde)]` once
-    // <https://github.com/arthurprs/qfilter/issues/13> is resolved
-    #[bincode(with = "turbo_bincode::serde_self_describing")] pub qfilter::Filter,
-);
-
 pub struct MetaEntry {
     /// The metadata for the static sorted file.
     sst_data: StaticSortedFileMetaData,
@@ -77,9 +66,15 @@ pub struct MetaEntry {
     /// The offset of the end of the AMQF data in the the meta file relative to the end of the
     /// header.
     end_of_amqf_data_offset: u32,
-    /// The AMQF filter of this file. This is only used if the range is very large. Smaller ranges
-    /// use the AMQF cache instead.
-    amqf: OnceLock<qfilter::Filter>,
+    /// The AMQF filter, deserialized zero-copy from the memory-mapped file.
+    ///
+    /// # Safety
+    ///
+    /// This is actually a `FilterRef<'mmap>` that borrows from the `MetaFile`'s mmap.
+    /// It is stored as `'static` because `MetaEntry` and the mmap are co-owned by `MetaFile`,
+    /// and Rust drops struct fields in declaration order, so `entries` (containing this field)
+    /// is dropped before `mmap`.
+    amqf: qfilter::FilterRef<'static>,
     /// The static sorted file that is lazily loaded
     sst: OnceLock<StaticSortedFile>,
 }
@@ -107,24 +102,8 @@ impl MetaEntry {
             .expect("AMQF data out of bounds")
     }
 
-    pub fn deserialize_amqf(&self, meta: &MetaFile) -> Result<qfilter::Filter> {
-        let amqf = self.raw_amqf(meta.amqf_data());
-        Ok(turbo_bincode_decode::<AmqfBincodeWrapper>(amqf)
-            .with_context(|| {
-                format!(
-                    "Failed to deserialize AMQF from {:08}.meta for {:08}.sst",
-                    meta.sequence_number,
-                    self.sequence_number()
-                )
-            })?
-            .0)
-    }
-
-    pub fn amqf(&self, meta: &MetaFile) -> Result<impl Deref<Target = qfilter::Filter>> {
-        self.amqf.get_or_try_init(|| {
-            let amqf = self.deserialize_amqf(meta)?;
-            anyhow::Ok(amqf)
-        })
+    pub fn amqf(&self) -> qfilter::FilterRef<'_> {
+        self.amqf
     }
 
     pub fn sst(&self, meta: &MetaFile) -> Result<&StaticSortedFile> {
@@ -219,7 +198,9 @@ pub struct MetaFile {
     sequence_number: u32,
     /// The key family of the SST files in this meta file.
     family: u32,
-    /// The entries of the file.
+    /// The entries of the file. Each entry's `amqf` field borrows from `mmap` via a
+    /// transmuted `'static` lifetime. This field MUST be declared before `mmap` so that
+    /// it is dropped first. See [`assert_entries_drop_before_mmap`].
     entries: Vec<MetaEntry>,
     /// The entries that have been marked as obsolete.
     obsolete_entries: Vec<u32>,
@@ -231,9 +212,18 @@ pub struct MetaFile {
     /// The offset of the end of the "used keys" AMQF data in the the meta file relative to the end
     /// of the header.
     end_of_used_keys_amqf_data_offset: u32,
-    /// The memory mapped file.
+    /// The memory mapped file. This field MUST be declared after `entries` so that
+    /// `entries` is dropped first (Rust drops fields in declaration order).
     mmap: Mmap,
 }
+
+/// Compile-time assertion that `entries` is laid out before `mmap` in `MetaFile`,
+/// guaranteeing that entries (containing `FilterRef`s borrowing from the mmap)
+/// are dropped before the mmap itself.
+const _: () = assert!(
+    std::mem::offset_of!(MetaFile, entries) < std::mem::offset_of!(MetaFile, mmap),
+    "MetaFile::entries must be declared before MetaFile::mmap for drop-order safety"
+);
 
 impl MetaFile {
     /// Opens a meta file at the given path. This memory maps the file, but does not read it yet.
@@ -258,32 +248,41 @@ impl MetaFile {
             let obsolete_sst = file.read_u32::<BE>()?;
             obsolete_sst_files.push(obsolete_sst);
         }
+
+        // First pass: read entry headers from the file (before the mmap is available).
+        struct EntryHeader {
+            sst_data: StaticSortedFileMetaData,
+            min_hash: u64,
+            max_hash: u64,
+            size: u64,
+            flags: MetaEntryFlags,
+            start_of_amqf_data_offset: u32,
+            end_of_amqf_data_offset: u32,
+        }
         let count = file.read_u32::<BE>()?;
-        let mut entries = Vec::with_capacity(count as usize);
+        let mut entry_headers = Vec::with_capacity(count as usize);
         let mut start_of_amqf_data_offset = 0;
         for _ in 0..count {
-            let entry = MetaEntry {
+            let header = EntryHeader {
                 sst_data: StaticSortedFileMetaData {
                     sequence_number: file.read_u32::<BE>()?,
                     key_compression_dictionary_length: file.read_u16::<BE>()?,
                     block_count: file.read_u16::<BE>()?,
                 },
-                family,
                 min_hash: file.read_u64::<BE>()?,
                 max_hash: file.read_u64::<BE>()?,
                 size: file.read_u64::<BE>()?,
                 flags: MetaEntryFlags(file.read_u32::<BE>()?),
                 start_of_amqf_data_offset,
                 end_of_amqf_data_offset: file.read_u32::<BE>()?,
-                amqf: OnceLock::new(),
-                sst: OnceLock::new(),
             };
-            start_of_amqf_data_offset = entry.end_of_amqf_data_offset;
-            entries.push(entry);
+            start_of_amqf_data_offset = header.end_of_amqf_data_offset;
+            entry_headers.push(header);
         }
         let start_of_used_keys_amqf_data_offset = start_of_amqf_data_offset;
         let end_of_used_keys_amqf_data_offset = file.read_u32::<BE>()?;
 
+        // Create the mmap over the AMQF data region.
         let offset = file.stream_position()?;
         let file = file.into_inner();
         let mut options = MmapOptions::new();
@@ -291,6 +290,43 @@ impl MetaFile {
         let mmap = unsafe { options.map(&file)? };
         #[cfg(unix)]
         mmap.advise(memmap2::Advice::Random)?;
+
+        // Second pass: build MetaEntry structs, eagerly deserializing each AMQF filter
+        // zero-copy from the mmap.
+        let amqf_data: &[u8] = &mmap;
+        let entries = entry_headers
+            .into_iter()
+            .map(|h| {
+                let raw_amqf = amqf_data
+                    .get(h.start_of_amqf_data_offset as usize..h.end_of_amqf_data_offset as usize)
+                    .expect("AMQF data out of bounds");
+                let amqf: qfilter::FilterRef<'_> =
+                    pot::from_slice(raw_amqf).with_context(|| {
+                        format!(
+                            "Failed to deserialize AMQF from {:08}.meta for {:08}.sst",
+                            sequence_number, h.sst_data.sequence_number
+                        )
+                    })?;
+                // SAFETY: The FilterRef borrows from `mmap` which is owned by the same
+                // MetaFile struct. Rust drops struct fields in declaration order, so
+                // `entries` (which contains these FilterRefs) is dropped before `mmap`.
+                // FilterRef is Copy and has no Drop impl.
+                let amqf: qfilter::FilterRef<'static> = unsafe { std::mem::transmute(amqf) };
+                anyhow::Ok(MetaEntry {
+                    sst_data: h.sst_data,
+                    family,
+                    min_hash: h.min_hash,
+                    max_hash: h.max_hash,
+                    size: h.size,
+                    flags: h.flags,
+                    start_of_amqf_data_offset: h.start_of_amqf_data_offset,
+                    end_of_amqf_data_offset: h.end_of_amqf_data_offset,
+                    amqf,
+                    sst: OnceLock::new(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
         let file = Self {
             db_path,
             sequence_number,
@@ -307,7 +343,6 @@ impl MetaFile {
 
     pub fn clear_cache(&mut self) {
         for entry in self.entries.iter_mut() {
-            entry.amqf.take();
             entry.sst.take();
         }
     }
@@ -315,7 +350,6 @@ impl MetaFile {
     pub fn prepare_sst_cache(&self) {
         for entry in self.entries.iter() {
             let _ = entry.sst(self);
-            let _ = entry.amqf(self);
         }
     }
 
@@ -340,7 +374,7 @@ impl MetaFile {
         &self.mmap
     }
 
-    pub fn deserialize_used_key_hashes_amqf(&self) -> Result<Option<qfilter::Filter>> {
+    pub fn deserialize_used_key_hashes_amqf(&self) -> Result<Option<qfilter::FilterRef<'_>>> {
         if self.start_of_used_keys_amqf_data_offset == self.end_of_used_keys_amqf_data_offset {
             return Ok(None);
         }
@@ -396,7 +430,7 @@ impl MetaFile {
                 continue;
             }
             {
-                let amqf = entry.amqf(self)?;
+                let amqf = entry.amqf();
                 if !amqf.contains_fingerprint(key_hash) {
                     miss_result = MetaLookupResult::QuickFilterMiss;
                     continue;
@@ -468,7 +502,7 @@ impl MetaFile {
                 }
                 continue;
             }
-            let amqf = entry.amqf(self)?;
+            let amqf = entry.amqf();
             for (hash, index, result) in &mut cells[start_index..=end_index] {
                 debug_assert!(
                     *hash >= entry.min_hash && *hash <= entry.max_hash,

@@ -8,12 +8,11 @@ use std::{
 
 use anyhow::{Context, Result};
 use byteorder::{BE, ByteOrder, WriteBytesExt};
-use turbo_bincode::{TurboBincodeBuffer, turbo_bincode_encode};
 
 use crate::{
     compression::compress_into_buffer,
     constants::{MAX_INLINE_VALUE_SIZE, MIN_SMALL_VALUE_BLOCK_SIZE},
-    meta_file::{AmqfBincodeWrapper, MetaEntryFlags},
+    meta_file::MetaEntryFlags,
     static_sorted_file::{
         BLOCK_TYPE_INDEX, BLOCK_TYPE_KEY_NO_HASH, BLOCK_TYPE_KEY_WITH_HASH,
         KEY_BLOCK_ENTRY_TYPE_BLOB, KEY_BLOCK_ENTRY_TYPE_DELETED, KEY_BLOCK_ENTRY_TYPE_INLINE_MIN,
@@ -158,7 +157,7 @@ pub fn write_static_stored_file<E: Entry>(
     let meta = StaticSortedFileBuilderMeta {
         min_hash,
         max_hash,
-        amqf: Cow::Owned(amqf.into_vec()),
+        amqf: Cow::Owned(amqf),
         key_compression_dictionary_length: key_dict.len().try_into().unwrap(),
         block_count,
         size: file.stream_position()?,
@@ -460,7 +459,7 @@ fn write_key_blocks_and_compute_amqf(
     key_compression_dictionary: &[u8],
     writer: &mut BlockWriter<'_>,
     buffer: &mut Vec<u8>,
-) -> Result<TurboBincodeBuffer> {
+) -> Result<Vec<u8>> {
     let mut filter = qfilter::Filter::new(entries.len() as u64, AMQF_FALSE_POSITIVE_RATE)
         // This won't fail as we limit the number of entries per SST file
         .expect("Filter can't be constructed");
@@ -578,7 +577,7 @@ fn write_key_blocks_and_compute_amqf(
     writer.write_index_block(buffer)?;
     buffer.clear();
 
-    Ok(turbo_bincode_encode(&AmqfBincodeWrapper(filter)).expect("AMQF serialization failed"))
+    Ok(pot::to_vec(&filter).expect("AMQF serialization failed"))
 }
 
 /// Builder for a single key block
