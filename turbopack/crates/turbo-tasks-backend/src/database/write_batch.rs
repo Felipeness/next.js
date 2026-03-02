@@ -1,3 +1,10 @@
+//! Write batch abstractions for key-value database operations.
+//!
+//! Provides [`SerialWriteBatch`] (single-threaded) and [`ConcurrentWriteBatch`] (multi-threaded)
+//! traits, unified under the [`WriteBatch`] enum. This allows database implementations to
+//! support whichever concurrency model they prefer while presenting a consistent interface to
+//! the backing storage layer.
+
 use std::{
     borrow::{Borrow, Cow},
     marker::PhantomData,
@@ -9,6 +16,7 @@ use smallvec::SmallVec;
 
 use crate::database::key_value_database::KeySpace;
 
+/// Common operations shared by serial and concurrent write batches.
 pub trait BaseWriteBatch<'a> {
     type ValueBuffer<'l>: std::borrow::Borrow<[u8]>
     where
@@ -21,6 +29,7 @@ pub trait BaseWriteBatch<'a> {
     fn commit(self) -> Result<()>;
 }
 
+/// A buffer for write batch keys/values, supporting borrowed, heap-allocated, and inline storage.
 pub enum WriteBuffer<'a> {
     Borrowed(&'a [u8]),
     Vec(Vec<u8>),
@@ -58,6 +67,7 @@ impl<'l> From<Cow<'l, [u8]>> for WriteBuffer<'l> {
     }
 }
 
+/// A single-threaded write batch that requires `&mut self` for writes.
 pub trait SerialWriteBatch<'a>: BaseWriteBatch<'a> {
     fn put(
         &mut self,
@@ -69,6 +79,7 @@ pub trait SerialWriteBatch<'a>: BaseWriteBatch<'a> {
     fn flush(&mut self, key_space: KeySpace) -> Result<()>;
 }
 
+/// A thread-safe write batch that allows concurrent `&self` writes from multiple threads.
 pub trait ConcurrentWriteBatch<'a>: BaseWriteBatch<'a> + Sync + Send {
     fn put(&self, key_space: KeySpace, key: WriteBuffer<'_>, value: WriteBuffer<'_>) -> Result<()>;
     fn delete(&self, key_space: KeySpace, key: WriteBuffer<'_>) -> Result<()>;
@@ -80,6 +91,8 @@ pub trait ConcurrentWriteBatch<'a>: BaseWriteBatch<'a> + Sync + Send {
     unsafe fn flush(&self, key_space: KeySpace) -> Result<()>;
 }
 
+/// An owned write batch that is either serial or concurrent, depending on the database's
+/// capabilities.
 pub enum WriteBatch<'a, S, C>
 where
     S: SerialWriteBatch<'a>,
@@ -183,6 +196,8 @@ where
     }
 }
 
+/// A borrowed reference to a write batch, useful for passing to sub-operations without
+/// transferring ownership.
 pub enum WriteBatchRef<'r, 'a, S, C>
 where
     S: SerialWriteBatch<'a>,
@@ -270,6 +285,8 @@ where
     }
 }
 
+/// Placeholder write batch that panics on all operations. Used as the default associated type
+/// for databases that only support one of serial/concurrent batching.
 pub struct UnimplementedWriteBatch;
 
 impl<'a> BaseWriteBatch<'a> for UnimplementedWriteBatch {
