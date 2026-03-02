@@ -102,6 +102,8 @@ where
     Concurrent(C, PhantomData<&'a ()>),
 }
 
+/// Value buffer returned by [`WriteBatch::get`], dispatching to the underlying serial or
+/// concurrent batch's buffer type.
 pub enum WriteBatchValueBuffer<S: Borrow<[u8]>, C: Borrow<[u8]>> {
     Serial(S),
     Concurrent(C),
