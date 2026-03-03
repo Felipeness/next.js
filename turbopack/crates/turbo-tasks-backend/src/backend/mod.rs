@@ -1136,38 +1136,6 @@ impl<B: BackingStorage> TurboTasksBackendInner<B> {
         let task_cache_stats: Mutex<FxHashMap<_, TaskCacheStats>> =
             Mutex::new(FxHashMap::default());
 
-        // Helper to encode task data and handle errors/stats
-        let encode_category = |task_id: TaskId,
-                               data: &TaskStorage,
-                               category: SpecificTaskDataCategory,
-                               buffer: &mut TurboBincodeBuffer|
-         -> Option<TurboBincodeBuffer> {
-            match encode_task_data(task_id, data, category, buffer) {
-                Ok(encoded) => {
-                    #[cfg(feature = "print_cache_item_size")]
-                    {
-                        let mut stats = task_cache_stats.lock();
-                        let entry = stats
-                            .entry(self.get_task_name(task_id, turbo_tasks))
-                            .or_default();
-                        match category {
-                            SpecificTaskDataCategory::Meta => entry.add_meta(&encoded),
-                            SpecificTaskDataCategory::Data => entry.add_data(&encoded),
-                        }
-                    }
-                    Some(encoded)
-                }
-                Err(err) => {
-                    eprintln!(
-                        "Serializing task {} failed ({:?}): {:?}",
-                        self.debug_get_task_description(task_id),
-                        category,
-                        err
-                    );
-                    None
-                }
-            }
-        };
         // Helper to encode a TaskStorage into a SnapshotItem
         // encode_meta/encode_data control whether to encode each category
         let encode_snapshot_item =
@@ -1176,6 +1144,37 @@ impl<B: BackingStorage> TurboTasksBackendInner<B> {
              encode_meta: bool,
              encode_data: bool,
              buffer: &mut TurboBincodeBuffer| {
+                let encode_category = |task_id: TaskId,
+                                       data: &TaskStorage,
+                                       category: SpecificTaskDataCategory,
+                                       buffer: &mut TurboBincodeBuffer|
+                 -> Option<TurboBincodeBuffer> {
+                    match encode_task_data(task_id, data, category, buffer) {
+                        Ok(encoded) => {
+                            #[cfg(feature = "print_cache_item_size")]
+                            {
+                                let mut stats = task_cache_stats.lock();
+                                let entry = stats
+                                    .entry(self.get_task_name(task_id, turbo_tasks))
+                                    .or_default();
+                                match category {
+                                    SpecificTaskDataCategory::Meta => entry.add_meta(&encoded),
+                                    SpecificTaskDataCategory::Data => entry.add_data(&encoded),
+                                }
+                            }
+                            Some(encoded)
+                        }
+                        Err(err) => {
+                            eprintln!(
+                                "Serializing task {} failed ({:?}): {:?}",
+                                self.debug_get_task_description(task_id),
+                                category,
+                                err
+                            );
+                            None
+                        }
+                    }
+                };
                 if task_id.is_transient() {
                     return SnapshotItem {
                         task_id,
@@ -1379,9 +1378,9 @@ impl<B: BackingStorage> TurboTasksBackendInner<B> {
 
         let elapsed = start.elapsed();
         // avoid spamming the event queue with information about fast operations
-        if elapsed > Duration::from_secs(10) {
+        if elapsed > Duration::from_secs(0) {
             turbo_tasks.send_compilation_event(Arc::new(TimingEvent::new(
-                "Finished writing to filesystem cache".to_string(),
+                format!("Finished writing to filesystem cache because: {reason}"),
                 elapsed,
             )));
         }
