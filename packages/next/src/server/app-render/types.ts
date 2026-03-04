@@ -19,6 +19,7 @@ import type { BaseNextRequest } from '../base-http'
 import type { IncomingMessage } from 'http'
 import type { RenderResumeDataCache } from '../resume-data-cache/resume-data-cache'
 import type { ServerCacheStatus } from '../../next-devtools/dev-overlay/cache-indicator'
+import type { AnyStream } from './stream-ops'
 
 const dynamicParamTypesSchema = s.enums([
   'c',
@@ -118,7 +119,7 @@ export interface RenderOptsPartial {
     requestId: string
   ) => void
   sendErrorsToBrowser?: (
-    errorsRscStream: ReadableStream<Uint8Array>,
+    errorsRscStream: AnyStream,
     htmlRequestId: string
   ) => void
   isBuildTimePrerendering?: boolean
