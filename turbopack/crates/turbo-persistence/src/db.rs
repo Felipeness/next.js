@@ -177,8 +177,12 @@ impl<S: ParallelScheduler, const FAMILIES: usize> TurboPersistence<S, FAMILIES> 
         path: PathBuf,
         read_only: bool,
         parallel_scheduler: S,
-        config: DbConfig<FAMILIES>,
+        mut config: DbConfig<FAMILIES>,
     ) -> Self {
+        // Allow the env var to override even const-constructed configs.
+        if std::env::var("TURBO_PERSISTENCE_MMAP").as_deref() == Ok("0") {
+            config.mmap = false;
+        }
         Self {
             parallel_scheduler,
             path,
@@ -383,7 +387,7 @@ impl<S: ParallelScheduler, const FAMILIES: usize> TurboPersistence<S, FAMILIES> 
         let mut meta_files = self
             .parallel_scheduler
             .parallel_map_collect::<_, _, Result<Vec<MetaFile>>>(&meta_files, |&seq| {
-                let meta_file = MetaFile::open(&self.path, seq)?;
+                let meta_file = MetaFile::open(&self.path, seq, self.config.mmap)?;
                 Ok(meta_file)
             })?;
 
@@ -404,22 +408,34 @@ impl<S: ParallelScheduler, const FAMILIES: usize> TurboPersistence<S, FAMILIES> 
         let path = self.path.join(format!("{seq:08}.blob"));
         let file = File::open(&path)
             .with_context(|| format!("Failed to open blob file {}", path.display()))?;
-        let mmap = unsafe { Mmap::map(&file) }.with_context(|| {
-            format!(
-                "Failed to mmap blob file {} ({} bytes)",
-                path.display(),
-                file.metadata().map(|m| m.len()).unwrap_or(0)
-            )
-        })?;
-        #[cfg(unix)]
-        mmap.advise(memmap2::Advice::Sequential)?;
-        #[cfg(unix)]
-        mmap.advise(memmap2::Advice::WillNeed)?;
-        #[cfg(target_os = "linux")]
-        mmap.advise(memmap2::Advice::DontFork)?;
-        #[cfg(target_os = "linux")]
-        mmap.advise(memmap2::Advice::Unmergeable)?;
-        let mut reader = &mmap[..];
+
+        let data: Vec<u8> = if self.config.mmap {
+            let mmap = unsafe { Mmap::map(&file) }.with_context(|| {
+                format!(
+                    "Failed to mmap blob file {} ({} bytes)",
+                    path.display(),
+                    file.metadata().map(|m| m.len()).unwrap_or(0)
+                )
+            })?;
+            #[cfg(unix)]
+            mmap.advise(memmap2::Advice::Sequential)?;
+            #[cfg(unix)]
+            mmap.advise(memmap2::Advice::WillNeed)?;
+            #[cfg(target_os = "linux")]
+            mmap.advise(memmap2::Advice::DontFork)?;
+            #[cfg(target_os = "linux")]
+            mmap.advise(memmap2::Advice::Unmergeable)?;
+            mmap.to_vec()
+        } else {
+            use std::io::Read;
+            let mut buf = Vec::new();
+            let mut file = std::io::BufReader::new(file);
+            file.read_to_end(&mut buf)
+                .with_context(|| format!("Failed to read blob file {}", path.display()))?;
+            buf
+        };
+
+        let mut reader = &data[..];
         let uncompressed_length = reader
             .read_u32::<BE>()
             .context("Failed to read uncompressed length from blob file")?;
@@ -580,7 +596,7 @@ impl<S: ParallelScheduler, const FAMILIES: usize> TurboPersistence<S, FAMILIES> 
             .parallel_scheduler
             .parallel_map_collect_owned::<_, _, Result<Vec<_>>>(new_meta_files, |(seq, file)| {
                 file.sync_all()?;
-                let meta_file = MetaFile::open(&self.path, seq)?;
+                let meta_file = MetaFile::open(&self.path, seq, self.config.mmap)?;
                 Ok(meta_file)
             })?;
 
@@ -1052,7 +1068,7 @@ impl<S: ParallelScheduler, const FAMILIES: usize> TurboPersistence<S, FAMILIES> 
                                 let index_in_meta = ssts_with_ranges[index].index_in_meta;
                                 let meta_file = &meta_files[meta_index];
                                 let entry = meta_file.entry(index_in_meta);
-                                let amqf = Cow::Borrowed(entry.raw_amqf(meta_file.amqf_data()));
+                                let amqf = Cow::Owned(entry.raw_amqf(meta_file)?.to_vec());
                                 let meta = StaticSortedFileBuilderMeta {
                                     min_hash: entry.min_hash(),
                                     max_hash: entry.max_hash(),
@@ -1080,6 +1096,7 @@ impl<S: ParallelScheduler, const FAMILIES: usize> TurboPersistence<S, FAMILIES> 
                                     StaticSortedFile::open_for_compaction(
                                         path,
                                         entry.sst_metadata(),
+                                        self.config.mmap,
                                     )?
                                     .try_into_iter()
                                 })
@@ -1700,18 +1717,15 @@ impl<S: ParallelScheduler, const FAMILIES: usize> TurboPersistence<S, FAMILIES> 
                 let entries = meta_file
                     .entries()
                     .iter()
-                    .map(|entry| {
-                        let amqf = entry.raw_amqf(meta_file.amqf_data());
-                        MetaFileEntryInfo {
-                            sequence_number: entry.sequence_number(),
-                            min_hash: entry.min_hash(),
-                            max_hash: entry.max_hash(),
-                            sst_size: entry.size(),
-                            flags: entry.flags(),
-                            amqf_size: entry.amqf_size(),
-                            amqf_entries: amqf.len(),
-                            block_count: entry.block_count(),
-                        }
+                    .map(|entry| MetaFileEntryInfo {
+                        sequence_number: entry.sequence_number(),
+                        min_hash: entry.min_hash(),
+                        max_hash: entry.max_hash(),
+                        sst_size: entry.size(),
+                        flags: entry.flags(),
+                        amqf_size: entry.amqf_size(),
+                        amqf_entries: entry.amqf_size() as usize,
+                        block_count: entry.block_count(),
                     })
                     .collect();
                 MetaFileInfo {
