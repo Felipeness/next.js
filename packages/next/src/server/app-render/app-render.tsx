@@ -1131,11 +1131,11 @@ async function generateDynamicFlightRenderResultWithStagesInDev(
     )
 
     if (shouldValidate) {
-      let validationDebugChannelClient: Readable | undefined = undefined
+      let validationDebugChannelClient: AnyStream | undefined = undefined
       if (returnedDebugChannel) {
         const [t1, t2] = teeStream(returnedDebugChannel.clientSide.readable)
         returnedDebugChannel.clientSide.readable = t1
-        validationDebugChannelClient = t2 as Readable
+        validationDebugChannelClient = t2
       }
       consoleAsyncStorage.run(
         { dim: true },
@@ -2917,11 +2917,11 @@ async function renderToStream(
             serverComponentsErrorHandler
           )
 
-          let validationDebugChannelClient: Readable | undefined = undefined
+          let validationDebugChannelClient: AnyStream | undefined = undefined
           if (returnedDebugChannel) {
             const [t1, t2] = teeStream(returnedDebugChannel.clientSide.readable)
             returnedDebugChannel.clientSide.readable = t1
-            validationDebugChannelClient = t2 as Readable
+            validationDebugChannelClient = t2
           }
 
           consoleAsyncStorage.run(
@@ -4035,7 +4035,7 @@ async function spawnStaticShellValidationInDevImpl(
   ctx: AppRenderContext,
   requestStore: RequestStore,
   fallbackRouteParams: OpaqueFallbackRouteParams | null,
-  debugChannelClient: Readable | undefined
+  debugChannelClient: AnyStream | undefined
 ): Promise<void> {
   const debug =
     process.env.NEXT_PRIVATE_DEBUG_VALIDATION === '1' ? console.log : undefined
@@ -4071,9 +4071,12 @@ async function spawnStaticShellValidationInDevImpl(
   let debugChunks: Uint8Array[] | null = null
   if (debugChannelClient) {
     debugChunks = []
-    debugChannelClient.on('data', (c) => {
-      debugChunks!.push(c)
-    })
+    const chunks = debugChunks
+    ;(async () => {
+      for await (const c of debugChannelClient as AsyncIterable<Uint8Array>) {
+        chunks.push(c)
+      }
+    })()
   }
 
   const accumulatedChunks = await accumulatedChunksPromise
