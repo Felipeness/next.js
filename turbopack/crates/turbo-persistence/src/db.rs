@@ -13,7 +13,6 @@ use anyhow::{Context, Result, bail};
 use byteorder::{BE, ReadBytesExt, WriteBytesExt};
 use dashmap::DashSet;
 use jiff::Timestamp;
-use memmap2::Mmap;
 use nohash_hasher::BuildNoHashHasher;
 use parking_lot::{Mutex, RwLock};
 use smallvec::SmallVec;
@@ -180,7 +179,7 @@ impl<S: ParallelScheduler, const FAMILIES: usize> TurboPersistence<S, FAMILIES> 
         mut config: DbConfig<FAMILIES>,
     ) -> Self {
         // Allow the env var to override even const-constructed configs.
-        if std::env::var("TURBO_PERSISTENCE_MMAP").as_deref() == Ok("0") {
+        if !crate::mmap_env_var() {
             config.mmap = false;
         }
         Self {
@@ -403,37 +402,20 @@ impl<S: ParallelScheduler, const FAMILIES: usize> TurboPersistence<S, FAMILIES> 
     }
 
     /// Reads and decompresses a blob file. This is not backed by any cache.
+    ///
+    /// Blob files are small enough to read entirely into memory (they are always read once
+    /// and fully decompressed), so we always use a plain file read regardless of the mmap setting.
     #[tracing::instrument(level = "info", name = "reading database blob", skip_all)]
     fn read_blob(&self, seq: u32) -> Result<ArcBytes> {
+        use std::io::Read;
+
         let path = self.path.join(format!("{seq:08}.blob"));
         let file = File::open(&path)
             .with_context(|| format!("Failed to open blob file {}", path.display()))?;
-
-        let data: Vec<u8> = if self.config.mmap {
-            let mmap = unsafe { Mmap::map(&file) }.with_context(|| {
-                format!(
-                    "Failed to mmap blob file {} ({} bytes)",
-                    path.display(),
-                    file.metadata().map(|m| m.len()).unwrap_or(0)
-                )
-            })?;
-            #[cfg(unix)]
-            mmap.advise(memmap2::Advice::Sequential)?;
-            #[cfg(unix)]
-            mmap.advise(memmap2::Advice::WillNeed)?;
-            #[cfg(target_os = "linux")]
-            mmap.advise(memmap2::Advice::DontFork)?;
-            #[cfg(target_os = "linux")]
-            mmap.advise(memmap2::Advice::Unmergeable)?;
-            mmap.to_vec()
-        } else {
-            use std::io::Read;
-            let mut buf = Vec::new();
-            let mut file = std::io::BufReader::new(file);
-            file.read_to_end(&mut buf)
-                .with_context(|| format!("Failed to read blob file {}", path.display()))?;
-            buf
-        };
+        let mut data = Vec::new();
+        std::io::BufReader::new(file)
+            .read_to_end(&mut data)
+            .with_context(|| format!("Failed to read blob file {}", path.display()))?;
 
         let mut reader = &data[..];
         let uncompressed_length = reader
