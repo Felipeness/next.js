@@ -114,7 +114,7 @@ export interface RenderOptsPartial {
   setCacheStatus?: (status: ServerCacheStatus, htmlRequestId: string) => void
   setIsrStatus?: (key: string, value: boolean | undefined) => void
   setReactDebugChannel?: (
-    debugChannel: { readable: ReadableStream<Uint8Array> },
+    debugChannel: { readable: AnyStream },
     htmlRequestId: string,
     requestId: string
   ) => void
