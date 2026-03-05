@@ -53,6 +53,25 @@ const AVG_SMALL_VALUE_SIZE: usize = 64;
 /// byte-size based estimates of pending key blocks.
 const BLOCK_INDEX_CAPACITY_BUFFER: usize = 16;
 
+/// Maximum key length that can use fixed-size key block layout.
+///
+/// The on-disk fixed-key header stores the key size as a single byte, so keys longer than this
+/// fall back to variable-size layout.
+const MAX_FIXED_KEY_LEN: usize = u8::MAX as usize;
+
+/// Newtype for the key block entry type byte.
+///
+/// This encodes what kind of value reference an entry has (small, medium, blob, deleted, or
+/// inline with embedded length). See `KEY_BLOCK_ENTRY_TYPE_*` constants.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct EntryType(u8);
+
+impl EntryType {
+    fn as_u8(self) -> u8 {
+        self.0
+    }
+}
+
 /// Tracks whether a key block's entries are uniform enough for fixed-size layout.
 ///
 /// State transitions:
@@ -65,22 +84,22 @@ enum KeyBlockFormat {
     /// No entries yet — format undetermined.
     Unknown,
     /// All entries so far have uniform key length and value type.
-    Fixed { key_len: usize, value_type: u8 },
+    Fixed { key_len: u8, value_type: EntryType },
     /// Entries have mixed key lengths or value types; must use offset table.
     Variable,
 }
 
 impl KeyBlockFormat {
-    /// Updates the format after observing an entry with the given key length and value type.
+    /// Updates the format after seeing an entry with the given key length and value type.
     ///
     /// A `Fixed` state is only reachable when all entries have matching key length and value type,
     /// and the key length fits in a u8 (required by the on-disk header).
-    fn observe(&mut self, key_len: usize, value_type: u8) {
+    fn update(&mut self, key_len: usize, value_type: EntryType) {
         *self = match *self {
             KeyBlockFormat::Unknown => {
-                if key_len <= u8::MAX as usize {
+                if key_len <= MAX_FIXED_KEY_LEN {
                     KeyBlockFormat::Fixed {
-                        key_len,
+                        key_len: key_len as u8,
                         value_type,
                     }
                 } else {
@@ -90,7 +109,7 @@ impl KeyBlockFormat {
             KeyBlockFormat::Fixed {
                 key_len: k,
                 value_type: v,
-            } if k == key_len && v == value_type => KeyBlockFormat::Fixed {
+            } if k as usize == key_len && v == value_type => KeyBlockFormat::Fixed {
                 key_len: k,
                 value_type: v,
             },
@@ -137,12 +156,12 @@ impl KeyBlockAccumulator {
     }
 
     /// Records a new entry in the accumulator.
-    fn add(&mut self, key_len: usize, key_hash: u64, value_type: u8) {
+    fn add(&mut self, key_len: usize, key_hash: u64, value_type: EntryType) {
         self.size += key_len + KEY_BLOCK_ENTRY_META_OVERHEAD;
         self.max_key_len = self.max_key_len.max(key_len);
         self.entry_count += 1;
         self.last_hash = key_hash;
-        self.format.observe(key_len, value_type);
+        self.format.update(key_len, value_type);
     }
 
     /// Snapshots the state needed by `flush_key_block` into a Copy-able struct.
@@ -377,15 +396,15 @@ enum ValueRef {
 }
 
 impl ValueRef {
-    /// Returns the key block entry type byte for this value reference.
-    fn entry_type(&self) -> u8 {
-        match self {
+    /// Returns the key block entry type for this value reference.
+    fn entry_type(&self) -> EntryType {
+        EntryType(match self {
             ValueRef::Small { .. } | ValueRef::PendingSmall { .. } => KEY_BLOCK_ENTRY_TYPE_SMALL,
             ValueRef::Medium { .. } => KEY_BLOCK_ENTRY_TYPE_MEDIUM,
             ValueRef::Inline { len, .. } => KEY_BLOCK_ENTRY_TYPE_INLINE_MIN + *len,
             ValueRef::Blob { .. } => KEY_BLOCK_ENTRY_TYPE_BLOB,
             ValueRef::Deleted => KEY_BLOCK_ENTRY_TYPE_DELETED,
-        }
+        })
     }
 
     /// Writes the value bytes for this reference to a buffer.
@@ -728,9 +747,10 @@ impl<E: Entry> StreamingSstWriter<E> {
         let mut flushed_key_size = 0usize;
 
         for i in self.first_pending_small_index..new_boundary {
-            let key_len = self.pending_keys[i].entry.key_len();
-            let key_hash = self.pending_keys[i].entry.key_hash();
-            let value_type = self.pending_keys[i].value_ref.entry_type();
+            let entry = &self.pending_keys[i];
+            let key_len = entry.entry.key_len();
+            let key_hash = entry.entry.key_hash();
+            let value_type = entry.value_ref.entry_type();
 
             if self.current_key_block.should_flush(key_len, key_hash) {
                 let block_end = last_flushed_end + self.current_key_block.entry_count;
@@ -826,7 +846,6 @@ impl<E: Entry> StreamingSstWriter<E> {
             value_type,
         } = info.format
         {
-            let key_size = key_size as u8;
             let mut builder = FixedKeyBlockBuilder::new(
                 &mut self.key_buffer,
                 entry_count as u32,
@@ -978,9 +997,10 @@ impl<E: Entry> StreamingSstWriter<E> {
         let mut acc = KeyBlockAccumulator::new();
 
         for i in 0..total {
-            let key_len = self.pending_keys[i].entry.key_len();
-            let key_hash = self.pending_keys[i].entry.key_hash();
-            let value_type = self.pending_keys[i].value_ref.entry_type();
+            let entry = &self.pending_keys[i];
+            let key_len = entry.entry.key_len();
+            let key_hash = entry.entry.key_hash();
+            let value_type = entry.value_ref.entry_type();
 
             if acc.should_flush(key_len, key_hash) {
                 self.flush_key_block(block_start, i, acc.flush_info())?;
@@ -1057,10 +1077,10 @@ impl<'l> KeyBlockBuilder<'l> {
     }
 
     /// Writes the entry header (position + type) for the current entry.
-    fn write_entry_header(&mut self, entry_type: u8) {
+    fn write_entry_header(&mut self, entry_type: EntryType) {
         let pos = self.buffer.len() - self.header_size;
         let header_offset = KEY_BLOCK_HEADER_SIZE + self.current_entry * 4;
-        let header = (pos as u32) | ((entry_type as u32) << 24);
+        let header = (pos as u32) | ((entry_type.as_u8() as u32) << 24);
         BE::write_u32(&mut self.buffer[header_offset..header_offset + 4], header);
     }
 
@@ -1102,7 +1122,7 @@ impl<'l> FixedKeyBlockBuilder<'l> {
         entry_count: u32,
         has_hash: bool,
         key_size: u8,
-        value_type: u8,
+        value_type: EntryType,
     ) -> Self {
         debug_assert!(entry_count < (1 << 24));
 
@@ -1119,7 +1139,7 @@ impl<'l> FixedKeyBlockBuilder<'l> {
         buffer.write_u8(block_type).unwrap();
         buffer.write_u24::<BE>(entry_count).unwrap();
         buffer.write_u8(key_size).unwrap();
-        buffer.write_u8(value_type).unwrap();
+        buffer.write_u8(value_type.as_u8()).unwrap();
 
         Self { buffer }
     }
@@ -1143,8 +1163,8 @@ impl<'l> FixedKeyBlockBuilder<'l> {
 ///
 /// This mirrors `entry_val_size` in the reader but panics on invalid types since the builder
 /// only produces valid types.
-fn value_type_val_size(ty: u8) -> usize {
-    match ty {
+fn value_type_val_size(ty: EntryType) -> usize {
+    match ty.as_u8() {
         KEY_BLOCK_ENTRY_TYPE_SMALL => SMALL_VALUE_REF_SIZE,
         KEY_BLOCK_ENTRY_TYPE_MEDIUM => MEDIUM_VALUE_REF_SIZE,
         KEY_BLOCK_ENTRY_TYPE_BLOB => BLOB_VALUE_REF_SIZE,
@@ -1152,7 +1172,7 @@ fn value_type_val_size(ty: u8) -> usize {
         ty if ty >= KEY_BLOCK_ENTRY_TYPE_INLINE_MIN => {
             (ty - KEY_BLOCK_ENTRY_TYPE_INLINE_MIN) as usize
         }
-        _ => panic!("Invalid key block entry type: {ty}"),
+        _ => panic!("Invalid key block entry type: {}", ty.as_u8()),
     }
 }
 

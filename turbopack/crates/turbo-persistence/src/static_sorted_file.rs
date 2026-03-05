@@ -947,7 +947,7 @@ fn entry_val_size(ty: u8) -> Result<usize> {
         ty if ty >= KEY_BLOCK_ENTRY_TYPE_INLINE_MIN => {
             Ok((ty - KEY_BLOCK_ENTRY_TYPE_INLINE_MIN) as usize)
         }
-        _ => bail!("Invalid key block entry type"),
+        _ => bail!("Invalid key block entry type: {ty}"),
     }
 }
 
