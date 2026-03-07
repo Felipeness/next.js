@@ -1,4 +1,5 @@
 import { nextTestSetup } from 'e2e-utils'
+import { extractBuildValidationError } from 'e2e-utils/instant-validation'
 
 describe('instant-validation-build', () => {
   const { next, skipped, isNextStart } = nextTestSetup({
@@ -56,10 +57,16 @@ describe('instant-validation-build', () => {
   describe('invalid - missing suspense around runtime', () => {
     it('should fail build when cookies are outside Suspense', async () => {
       const result = await prerender('/invalid-missing-suspense-around-runtime')
+      expect(extractBuildValidationError(result.cliOutput))
+        .toMatchInlineSnapshot(`
+       "Error: Route "/invalid-missing-suspense-around-runtime": Uncached data or \`connection()\` was accessed outside of \`<Suspense>\`. This delays the entire page from rendering, resulting in a slow user experience. Learn more: https://nextjs.org/docs/messages/blocking-route
+           at main (<anonymous>)
+           at body (<anonymous>)
+           at html (<anonymous>)
+           at Suspense (<anonymous>)
+       Build-time instant validation failed for route "/invalid-missing-suspense-around-runtime"."
+      `)
       expect(result.exitCode).toBe(1)
-      expect(result.cliOutput).toContain(
-        'Build-time instant validation failed for route "/invalid-missing-suspense-around-runtime"'
-      )
     })
   })
 
@@ -77,10 +84,20 @@ describe('instant-validation-build', () => {
       const result = await prerender(
         '/search-params/invalid-undeclared-search-param'
       )
+      expect(extractBuildValidationError(result.cliOutput))
+        .toMatchInlineSnapshot(`
+       "Error: Route "/search-params/invalid-undeclared-search-param" accessed searchParam "undeclared" which is not defined in the \`samples\` of \`unstable_instant\`. Add it to the sample's \`searchParams\` object, or \`{ "undeclared": null }\` if it should be absent.
+           at e (app/search-params/invalid-undeclared-search-param/page.tsx:31:14)
+         29 |   searchParams: Promise<{ q?: string; undeclared?: string }>
+         30 | }) {
+       > 31 |   const { q, undeclared } = await searchParams
+            |              ^
+         32 |   return (
+         33 |     <div id="search-result">
+         34 |       query: {q}, undeclared: {undeclared}
+       Build-time instant validation failed for route "/search-params/invalid-undeclared-search-param"."
+      `)
       expect(result.exitCode).toBe(1)
-      expect(result.cliOutput).toContain(
-        'accessed searchParam "undeclared" which is not defined'
-      )
     })
 
     it('useSearchParams() receives search params from samples', async () => {
@@ -93,10 +110,22 @@ describe('instant-validation-build', () => {
       const result = await prerender(
         '/search-params/invalid-undeclared-use-search-params'
       )
+      expect(extractBuildValidationError(result.cliOutput))
+        .toMatchInlineSnapshot(`
+       "Error: Route "/search-params/invalid-undeclared-use-search-params" accessed searchParam "undeclared" which is not defined in the \`samples\` of \`unstable_instant\`. Add it to the sample's \`searchParams\` array, or \`{ "undeclared": null }\` if it should be absent if it should be absent.
+           at <unknown> (app/search-params/invalid-undeclared-use-search-params/search-params-reader.tsx:8:20)
+          6 |   const sp = useSearchParams()
+          7 |   // 'undeclared' is not in the sample's searchParams, so this should error
+       >  8 |   const value = sp.get('undeclared')
+            |                    ^
+          9 |   return <div id="result">undeclared: {value}</div>
+         10 | }
+         11 | {
+         digest: 'INSTANT_VALIDATION_EXHAUSTIVE_SAMPLES_ERROR'
+       }
+       Build-time instant validation failed for route "/search-params/invalid-undeclared-use-search-params"."
+      `)
       expect(result.exitCode).toBe(1)
-      expect(result.cliOutput).toContain(
-        'accessed searchParam "undeclared" which is not defined'
-      )
     })
   })
 
@@ -110,20 +139,44 @@ describe('instant-validation-build', () => {
 
     it('error - .get() of cookie not present in samples', async () => {
       const result = await prerender('/cookies/invalid-undeclared-cookie-get')
+      expect(extractBuildValidationError(result.cliOutput))
+        .toMatchInlineSnapshot(`
+       "Error: Route "/cookies/invalid-undeclared-cookie-get" accessed cookie "undeclaredCookie" which is not defined in the \`samples\` of \`unstable_instant\`. Add it to the sample's \`cookies\` array, or \`{ name: "undeclaredCookie", value: null }\` if it should be absent.
+           at g (app/cookies/invalid-undeclared-cookie-get/page.tsx:27:40)
+         25 |   const cookieStore = await cookies()
+         26 |   // TODO(instant-validation-build): should this throw in addition to aborting?
+       > 27 |   const undeclaredCookie = cookieStore.get('undeclaredCookie')
+            |                                        ^
+         28 |   assert.strictEqual(
+         29 |     undeclaredCookie,
+         30 |     undefined, {
+         digest: 'INSTANT_VALIDATION_EXHAUSTIVE_SAMPLES_ERROR'
+       }
+       Build-time instant validation failed for route "/cookies/invalid-undeclared-cookie-get"."
+      `)
       expect(result.exitCode).toBe(1)
-      expect(result.cliOutput).toContain(
-        'accessed cookie "undeclaredCookie" which is not defined'
-      )
       // The page asserts on the values
       expect(result.cliOutput).not.toContain('AssertionError')
     })
 
     it('error - .has() of cookie not present in samples', async () => {
       const result = await prerender('/cookies/invalid-undeclared-cookie-has')
+      expect(extractBuildValidationError(result.cliOutput))
+        .toMatchInlineSnapshot(`
+       "Error: Route "/cookies/invalid-undeclared-cookie-has" accessed cookie "undeclaredCookie" which is not defined in the \`samples\` of \`unstable_instant\`. Add it to the sample's \`cookies\` array, or \`{ name: "undeclaredCookie", value: null }\` if it should be absent.
+           at g (app/cookies/invalid-undeclared-cookie-has/page.tsx:27:43)
+         25 |   const cookieStore = await cookies()
+         26 |   // TODO(instant-validation-build): should this throw in addition to aborting?
+       > 27 |   const hasUndeclaredCookie = cookieStore.has('undeclaredCookie')
+            |                                           ^
+         28 |   assert.strictEqual(
+         29 |     hasUndeclaredCookie,
+         30 |     false, {
+         digest: 'INSTANT_VALIDATION_EXHAUSTIVE_SAMPLES_ERROR'
+       }
+       Build-time instant validation failed for route "/cookies/invalid-undeclared-cookie-has"."
+      `)
       expect(result.exitCode).toBe(1)
-      expect(result.cliOutput).toContain(
-        'accessed cookie "undeclaredCookie" which is not defined'
-      )
       // The page asserts on the values
       expect(result.cliOutput).not.toContain('AssertionError')
     })
@@ -143,10 +196,22 @@ describe('instant-validation-build', () => {
       const result = await prerender(
         '/params/invalid-param-not-provided/[one]/[two]'
       )
+      expect(extractBuildValidationError(result.cliOutput))
+        .toMatchInlineSnapshot(`
+       "Error: Route "/params/invalid-param-not-provided/[one]/[two]" accessed param "two" which is not defined in the \`samples\` of \`unstable_instant\`. Add it to the sample's \`params\` array.
+           at f (app/params/invalid-param-not-provided/[one]/[two]/page.tsx:45:18)
+         43 |   assert.equal(p.one, '123', \`Unexpected value for param 'one'\`)
+         44 |   // TODO(instant-validation-build): this should throw and abort
+       > 45 |   assert.equal(p.two, undefined, \`Unexpected value for param 'two'\`)
+            |                  ^
+         46 |
+         47 |   // TODO: test \`in\` and iteration
+         48 |   // assert.deepStrictEqual( {
+         digest: 'INSTANT_VALIDATION_EXHAUSTIVE_SAMPLES_ERROR'
+       }
+       Build-time instant validation failed for route "/params/invalid-param-not-provided/[one]/[two]"."
+      `)
       expect(result.exitCode).toBe(1)
-      expect(result.cliOutput).toContain(
-        'accessed param "two" which is not defined'
-      )
       // The page asserts on the values
       expect(result.cliOutput).not.toContain('AssertionError')
     })
@@ -161,10 +226,22 @@ describe('instant-validation-build', () => {
       const result = await prerender(
         '/params/invalid-undeclared-use-params/[one]/[two]'
       )
+      expect(extractBuildValidationError(result.cliOutput))
+        .toMatchInlineSnapshot(`
+       "Error: Route "/params/invalid-undeclared-use-params/[one]/[two]" accessed param "two" which is not defined in the \`samples\` of \`unstable_instant\`. Add it to the sample's \`params\` array.
+           at <unknown> (app/params/invalid-undeclared-use-params/[one]/[two]/params-reader.tsx:6:18)
+         4 |
+         5 | export function ParamsReader() {
+       > 6 |   const params = useParams()
+           |                  ^
+         7 |   // 'two' is not in the sample's params, so this should error
+         8 |   const value = params.two
+         9 |   return <div id="result">two: {value}</div> {
+         digest: 'INSTANT_VALIDATION_EXHAUSTIVE_SAMPLES_ERROR'
+       }
+       Build-time instant validation failed for route "/params/invalid-undeclared-use-params/[one]/[two]"."
+      `)
       expect(result.exitCode).toBe(1)
-      expect(result.cliOutput).toContain(
-        'accessed param "two" which is not defined'
-      )
     })
   })
 
@@ -211,6 +288,21 @@ describe('instant-validation-build', () => {
       const result = await prerender(
         '/pathname/invalid-use-pathname-missing-params/[one]/[two]'
       )
+      expect(extractBuildValidationError(result.cliOutput))
+        .toMatchInlineSnapshot(`
+       "Error: Route "/pathname/invalid-use-pathname-missing-params/[one]/[two]" called usePathname() but param "two" is not defined in the \`samples\` of \`unstable_instant\`. usePathname() requires all route params to be provided.
+           at <unknown> (app/pathname/invalid-use-pathname-missing-params/[one]/[two]/pathname-reader.tsx:7:20)
+          5 | export function PathnameReader() {
+          6 |   // usePathname() should throw because not all params are provided in samples
+       >  7 |   const pathname = usePathname()
+            |                    ^
+          8 |   return <div id="result">pathname: {pathname}</div>
+          9 | }
+         10 | {
+         digest: 'INSTANT_VALIDATION_EXHAUSTIVE_SAMPLES_ERROR'
+       }
+       Build-time instant validation failed for route "/pathname/invalid-use-pathname-missing-params/[one]/[two]"."
+      `)
       expect(result.exitCode).toBe(1)
     })
   })
